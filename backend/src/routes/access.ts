@@ -122,6 +122,12 @@ router.post('/scan', authMiddleware, async (req: AuthRequest, res) => {
           await db.prepare(`
             UPDATE attendances SET checkOut = ?, status = ?, workHours = ? WHERE id = ?
           `).run(accessTime, status, workHours, existingAttendance.id);
+        } else {
+          const { status, workHours } = await calculateAttendanceStatus(employee.id, employee.department, dateStr, null, accessTime);
+          await db.prepare(`
+            INSERT INTO attendances (id, employeeId, employeeName, department, date, checkIn, checkOut, status, workHours, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(uuidv4(), employee.id, employee.name, employee.department, dateStr, null, accessTime, status, workHours, new Date().toISOString());
         }
       }
     }
@@ -245,6 +251,12 @@ router.post('/scan-public', async (req, res) => {
           await db.prepare(`
             UPDATE attendances SET checkOut = ?, status = ?, workHours = ? WHERE id = ?
           `).run(accessTime, status, workHours, existingAttendance.id);
+        } else {
+          const { status, workHours } = await calculateAttendanceStatus(employee.id, employee.department, dateStr, null, accessTime);
+          await db.prepare(`
+            INSERT INTO attendances (id, employeeId, employeeName, department, date, checkIn, checkOut, status, workHours, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(uuidv4(), employee.id, employee.name, employee.department, dateStr, null, accessTime, status, workHours, new Date().toISOString());
         }
       }
     }

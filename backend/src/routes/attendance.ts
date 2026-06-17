@@ -55,10 +55,27 @@ router.get('/my/today', authMiddleware, async (req: AuthRequest, res) => {
 });
 
 router.get('/', authMiddleware, requireRole('admin', 'hr'), async (req: AuthRequest, res) => {
-  const { date, department, employeeId, status, page = 1, pageSize = 50 } = req.query;
+  const { date, department, employeeId, status, month, startDate, endDate, page = 1, pageSize = 50 } = req.query;
 
   let sql = 'SELECT * FROM attendances WHERE 1=1';
   const params: string[] = [];
+
+  if (month) {
+    const [year, mon] = (month as string).split('-').map(Number);
+    const mStart = `${year}-${String(mon).padStart(2, '0')}-01`;
+    const mEnd = new Date(year, mon, 0).toISOString().split('T')[0];
+    sql += ' AND date >= ? AND date <= ?';
+    params.push(mStart, mEnd);
+  } else {
+    if (startDate) {
+      sql += ' AND date >= ?';
+      params.push(startDate as string);
+    }
+    if (endDate) {
+      sql += ' AND date <= ?';
+      params.push(endDate as string);
+    }
+  }
 
   if (date) {
     sql += ' AND date = ?';
@@ -98,65 +115,98 @@ router.get('/', authMiddleware, requireRole('admin', 'hr'), async (req: AuthRequ
 });
 
 router.get('/statistics', authMiddleware, requireRole('admin', 'hr'), async (req: AuthRequest, res) => {
-  const { startDate, endDate, department } = req.query;
+  const { month, startDate, endDate, department } = req.query;
 
-  let sql = `
-    SELECT 
-      department,
-      COUNT(*) as totalDays,
-      SUM(CASE WHEN status = 'normal' THEN 1 ELSE 0 END) as normalDays,
-      SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) as lateDays,
-      SUM(CASE WHEN status = 'early_leave' THEN 1 ELSE 0 END) as earlyLeaveDays,
-      SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) as absentDays,
-      SUM(CASE WHEN status IN ('missing_checkin', 'missing_checkout') THEN 1 ELSE 0 END) as missingDays,
-      AVG(workHours) as avgWorkHours
-    FROM attendances 
-    WHERE status NOT IN ('holiday', 'weekend')
-  `;
-
+  let dateFilter = '';
   const params: string[] = [];
 
-  if (startDate) {
-    sql += ' AND date >= ?';
-    params.push(startDate as string);
-  }
-
-  if (endDate) {
-    sql += ' AND date <= ?';
-    params.push(endDate as string);
+  if (month) {
+    const [year, mon] = (month as string).split('-').map(Number);
+    const mStart = `${year}-${String(mon).padStart(2, '0')}-01`;
+    const mEnd = new Date(year, mon, 0).toISOString().split('T')[0];
+    dateFilter = ' AND date >= ? AND date <= ?';
+    params.push(mStart, mEnd);
+  } else {
+    if (startDate) {
+      dateFilter += ' AND date >= ?';
+      params.push(startDate as string);
+    }
+    if (endDate) {
+      dateFilter += ' AND date <= ?';
+      params.push(endDate as string);
+    }
   }
 
   if (department) {
-    sql += ' AND department = ?';
+    dateFilter += ' AND department = ?';
     params.push(department as string);
   }
 
-  sql += ' GROUP BY department ORDER BY department';
+  const deptSql = `
+    SELECT 
+      department,
+      COUNT(*) as totalDays,
+      SUM(CASE WHEN status = 'normal' THEN 1 ELSE 0 END) as normal,
+      SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) as late,
+      SUM(CASE WHEN status = 'early' THEN 1 ELSE 0 END) as early,
+      SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) as absent,
+      SUM(CASE WHEN status IN ('missing_checkin', 'missing_checkout') THEN 1 ELSE 0 END) as missing,
+      AVG(workHours) as avgWorkHours
+    FROM attendances 
+    WHERE status NOT IN ('holiday', 'weekend')${dateFilter}
+    GROUP BY department ORDER BY department
+  `;
 
-  const stats = await db.prepare(sql).all(...params);
+  const byDepartment = await db.prepare(deptSql).all(...params);
 
   const overallSql = `
     SELECT 
       COUNT(*) as totalDays,
       COUNT(DISTINCT employeeId) as totalEmployees,
-      SUM(CASE WHEN status = 'normal' THEN 1 ELSE 0 END) as normalDays,
-      SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) as lateDays,
-      SUM(CASE WHEN status = 'early_leave' THEN 1 ELSE 0 END) as earlyLeaveDays,
-      SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) as absentDays,
-      SUM(CASE WHEN status IN ('missing_checkin', 'missing_checkout') THEN 1 ELSE 0 END) as missingDays,
+      SUM(CASE WHEN status = 'normal' THEN 1 ELSE 0 END) as normal,
+      SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) as late,
+      SUM(CASE WHEN status = 'early' THEN 1 ELSE 0 END) as early,
+      SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) as absent,
+      SUM(CASE WHEN status IN ('missing_checkin', 'missing_checkout') THEN 1 ELSE 0 END) as missing,
       AVG(workHours) as avgWorkHours
     FROM attendances 
-    WHERE status NOT IN ('holiday', 'weekend')
+    WHERE status NOT IN ('holiday', 'weekend')${dateFilter}
   `;
 
-  const overallParams = [...params];
-  const overall = await db.prepare(overallSql).get(...overallParams) as any;
+  const overall = await db.prepare(overallSql).get(...params) as any;
+
+  const byStatus = {
+    normal: overall?.normal || 0,
+    late: overall?.late || 0,
+    early: overall?.early || 0,
+    absent: overall?.absent || 0,
+    missing: overall?.missing || 0,
+    weekend: 0,
+    holiday: 0,
+  };
+
+  const weekendHolidaySql = `
+    SELECT 
+      SUM(CASE WHEN status = 'weekend' THEN 1 ELSE 0 END) as weekend,
+      SUM(CASE WHEN status = 'holiday' THEN 1 ELSE 0 END) as holiday
+    FROM attendances WHERE 1=1${dateFilter.replace('AND', 'AND')}
+  `;
+
+  const weekendParams = [...params];
+  const whResult = await db.prepare(weekendHolidaySql).get(...weekendParams) as any;
+  if (whResult) {
+    byStatus.weekend = whResult.weekend || 0;
+    byStatus.holiday = whResult.holiday || 0;
+  }
 
   res.json({
     success: true,
     data: {
-      byDepartment: stats,
+      byDepartment,
       overall,
+      byStatus,
+      totalDays: overall?.totalDays || 0,
+      totalEmployees: overall?.totalEmployees || 0,
     },
   });
 });
@@ -179,7 +229,7 @@ router.get('/monthly-report', authMiddleware, requireRole('admin', 'hr'), async 
       COUNT(*) as totalWorkDays,
       SUM(CASE WHEN a.status = 'normal' THEN 1 ELSE 0 END) as normalDays,
       SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) as lateDays,
-      SUM(CASE WHEN a.status = 'early_leave' THEN 1 ELSE 0 END) as earlyLeaveDays,
+      SUM(CASE WHEN a.status = 'early' THEN 1 ELSE 0 END) as earlyLeaveDays,
       SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) as absentDays,
       SUM(CASE WHEN a.status IN ('missing_checkin', 'missing_checkout') THEN 1 ELSE 0 END) as missingDays,
       SUM(CASE WHEN a.status = 'holiday' THEN 1 ELSE 0 END) as holidays,
@@ -232,7 +282,7 @@ router.get('/export-monthly', authMiddleware, requireRole('admin', 'hr'), async 
       CASE a.status
         WHEN 'normal' THEN '正常'
         WHEN 'late' THEN '迟到'
-        WHEN 'early_leave' THEN '早退'
+        WHEN 'early' THEN '早退'
         WHEN 'absent' THEN '旷工'
         WHEN 'missing_checkin' THEN '漏打卡(上班)'
         WHEN 'missing_checkout' THEN '漏打卡(下班)'
@@ -268,7 +318,7 @@ router.get('/export-monthly', authMiddleware, requireRole('admin', 'hr'), async 
       COUNT(*) as 总天数,
       SUM(CASE WHEN a.status = 'normal' THEN 1 ELSE 0 END) as 正常,
       SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) as 迟到,
-      SUM(CASE WHEN a.status = 'early_leave' THEN 1 ELSE 0 END) as 早退,
+      SUM(CASE WHEN a.status = 'early' THEN 1 ELSE 0 END) as 早退,
       SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) as 旷工,
       SUM(CASE WHEN a.status IN ('missing_checkin', 'missing_checkout') THEN 1 ELSE 0 END) as 漏打卡,
       SUM(CASE WHEN a.status = 'holiday' THEN 1 ELSE 0 END) as 节假日,
@@ -297,7 +347,7 @@ router.get('/export-monthly', authMiddleware, requireRole('admin', 'hr'), async 
       COUNT(*) as 总考勤记录,
       SUM(CASE WHEN a.status = 'normal' THEN 1 ELSE 0 END) as 正常,
       SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) as 迟到,
-      SUM(CASE WHEN a.status = 'early_leave' THEN 1 ELSE 0 END) as 早退,
+      SUM(CASE WHEN a.status = 'early' THEN 1 ELSE 0 END) as 早退,
       SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) as 旷工,
       SUM(CASE WHEN a.status IN ('missing_checkin', 'missing_checkout') THEN 1 ELSE 0 END) as 漏打卡,
       ROUND(AVG(a.workHours), 2) as 平均工时
@@ -330,10 +380,20 @@ router.get('/export-monthly', authMiddleware, requireRole('admin', 'hr'), async 
 });
 
 router.post('/recalculate', authMiddleware, requireRole('admin', 'hr'), async (req: AuthRequest, res) => {
-  const { startDate, endDate } = req.body;
+  const { month, startDate, endDate } = req.body;
 
-  if (!startDate || !endDate) {
-    return res.status(400).json({ success: false, error: '请指定日期范围' });
+  let calcStartDate: string;
+  let calcEndDate: string;
+
+  if (month) {
+    const [year, mon] = month.split('-').map(Number);
+    calcStartDate = `${year}-${String(mon).padStart(2, '0')}-01`;
+    calcEndDate = new Date(year, mon, 0).toISOString().split('T')[0];
+  } else if (startDate && endDate) {
+    calcStartDate = startDate;
+    calcEndDate = endDate;
+  } else {
+    return res.status(400).json({ success: false, error: '请指定月份或日期范围' });
   }
 
   const employees = await db.prepare('SELECT id, name, department FROM employees').all() as any[];
@@ -341,8 +401,9 @@ router.post('/recalculate', authMiddleware, requireRole('admin', 'hr'), async (r
   let updatedCount = 0;
 
   for (const emp of employees) {
-    const currentDate = new Date(startDate);
-    while (currentDate <= new Date(endDate)) {
+    const currentDate = new Date(calcStartDate + 'T00:00:00');
+    const end = new Date(calcEndDate + 'T00:00:00');
+    while (currentDate <= end) {
       const dateStr = formatDate(currentDate);
       
       const attendance = await db.prepare('SELECT * FROM attendances WHERE employeeId = ? AND date = ?').get(emp.id, dateStr) as any;
@@ -369,7 +430,7 @@ router.get('/abnormal/today', authMiddleware, requireRole('admin', 'hr'), async 
   
   const abnormal = await db.prepare(`
     SELECT * FROM attendances 
-    WHERE date = ? AND status IN ('late', 'early_leave', 'absent', 'missing_checkin', 'missing_checkout')
+    WHERE date = ? AND status IN ('late', 'early', 'absent', 'missing_checkin', 'missing_checkout')
     ORDER BY department, employeeName
   `).all(today);
 

@@ -92,7 +92,7 @@ router.post('/', authMiddleware, requireRole('admin', 'reception'), async (req: 
     return res.status(400).json({ success: false, error: '请填写完整信息' });
   }
 
-  const host = await db.prepare('SELECT name FROM employees WHERE id = ?').get(hostEmployeeId) as any;
+  const host = await db.prepare('SELECT id, name, department FROM employees WHERE id = ?').get(hostEmployeeId) as any;
   if (!host) {
     return res.status(400).json({ success: false, error: '被访员工不存在' });
   }
@@ -100,35 +100,49 @@ router.post('/', authMiddleware, requireRole('admin', 'reception'), async (req: 
   const id = uuidv4();
   const passCode = `VIS-${id.slice(0, 8).toUpperCase()}`;
 
-  await db.prepare(`
-    INSERT INTO visitors (
+  try {
+    await db.run('BEGIN TRANSACTION');
+
+    await db.prepare(`
+      INSERT INTO visitors (
+        id, name, phone, idCard, company, purpose,
+        hostEmployeeId, hostName, status,
+        passCode, passCodeValidFrom, passCodeValidTo, allowedDoors,
+        estimatedArrival, createdAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
       id, name, phone, idCard, company, purpose,
-      hostEmployeeId, hostName, status,
-      passCode, passCodeValidFrom, passCodeValidTo, allowedDoors,
-      estimatedArrival, createdAt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id, name, phone, idCard, company, purpose,
-    hostEmployeeId, host.name, 'pending',
-    passCode, passCodeValidFrom || null, passCodeValidTo || null,
-    allowedDoors ? JSON.stringify(allowedDoors) : null,
-    estimatedArrival, new Date().toISOString()
-  );
+      hostEmployeeId, host.name, 'pending',
+      passCode, passCodeValidFrom || null, passCodeValidTo || null,
+      allowedDoors ? JSON.stringify(allowedDoors) : null,
+      estimatedArrival, new Date().toISOString()
+    );
 
-  await db.prepare(`
-    INSERT INTO notifications (
-      id, employeeId, type, title, content, relatedId, createdAt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    uuidv4(), hostEmployeeId, 'visitor_arrival',
-    '访客来访通知',
-    `您有一位访客等待确认：${name}（${company}），来访目的：${purpose}`,
-    id, new Date().toISOString()
-  );
+    await db.prepare(`
+      INSERT INTO notifications (
+        id, employeeId, type, title, message, relatedId, createdAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      uuidv4(), hostEmployeeId, 'visitor_arrival',
+      '访客来访通知',
+      `您有一位访客等待确认：${name}（${company}），来访目的：${purpose}`,
+      id, new Date().toISOString()
+    );
 
-  broadcastVisitorUpdate();
+    await db.run('COMMIT');
 
-  res.json({ success: true, data: { id, passCode }, message: '访客登记成功，已通知被访员工' });
+    broadcastVisitorUpdate();
+
+    res.json({ success: true, data: { id, passCode }, message: '访客登记成功，已通知被访员工' });
+  } catch (error: any) {
+    try {
+      await db.run('ROLLBACK');
+    } catch (rollbackError) {
+      console.error('Rollback failed:', rollbackError);
+    }
+    console.error('Visitor registration failed:', error);
+    res.status(500).json({ success: false, error: '访客登记失败，请重试' });
+  }
 });
 
 router.put('/:id/confirm', authMiddleware, async (req: AuthRequest, res) => {

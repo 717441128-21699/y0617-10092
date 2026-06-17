@@ -1,5 +1,4 @@
 import db from './database';
-import { WorkRule, Holiday } from './types';
 
 export function formatDate(date: Date): string {
   return date.toISOString().split('T')[0];
@@ -14,22 +13,25 @@ export function parseTime(timeStr: string): { hours: number; minutes: number } {
   return { hours, minutes };
 }
 
-export async function getWorkRuleForDepartment(department: string): Promise<WorkRule | null> {
-  let rule = await db.prepare('SELECT * FROM workRules WHERE department = ?').get(department) as WorkRule | undefined;
-  
-  if (!rule) {
-    rule = await db.prepare('SELECT * FROM workRules WHERE isDefault = 1').get() as WorkRule | undefined;
+export async function getWorkRuleForEmployee(employeeId: string): Promise<any | null> {
+  const employee = await db.prepare('SELECT workRuleId FROM employees WHERE id = ?').get(employeeId) as any;
+  if (!employee) return null;
+
+  if (employee.workRuleId) {
+    const rule = await db.prepare('SELECT * FROM workRules WHERE id = ?').get(employee.workRuleId);
+    if (rule) return rule;
   }
-  
-  return rule || null;
+
+  const allRules = await db.prepare('SELECT * FROM workRules ORDER BY createdAt LIMIT 1').all();
+  return allRules[0] || null;
 }
 
-export async function isHoliday(dateStr: string): Promise<Holiday | null> {
-  return await db.prepare('SELECT * FROM holidays WHERE date = ?').get(dateStr) as Holiday | null;
+export async function isHoliday(dateStr: string): Promise<any | null> {
+  return await db.prepare('SELECT * FROM holidays WHERE date = ?').get(dateStr);
 }
 
 export function isWeekend(dateStr: string): boolean {
-  const date = new Date(dateStr);
+  const date = new Date(dateStr + 'T00:00:00');
   const day = date.getDay();
   return day === 0 || day === 6;
 }
@@ -43,10 +45,14 @@ export async function calculateAttendanceStatus(
 ): Promise<{ status: string; workHours: number | null }> {
   const holiday = await isHoliday(dateStr);
   if (holiday) {
-    return { status: holiday.type === 'holiday' ? 'holiday' : 'normal', workHours: null };
+    if (holiday.type === 'makeup') {
+      // 调休工作日，按正常工作日算
+    } else {
+      return { status: 'holiday', workHours: null };
+    }
   }
 
-  if (isWeekend(dateStr)) {
+  if (!holiday && isWeekend(dateStr)) {
     return { status: 'weekend', workHours: null };
   }
 
@@ -54,26 +60,38 @@ export async function calculateAttendanceStatus(
     return { status: 'absent', workHours: null };
   }
 
-  const rule = await getWorkRuleForDepartment(department);
+  const rule = await getWorkRuleForEmployee(employeeId);
   if (!rule) {
+    if (checkIn && checkOut) {
+      const diffMs = new Date(checkOut).getTime() - new Date(checkIn).getTime();
+      return { status: 'normal', workHours: Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100 };
+    }
+    if (!checkIn && checkOut) {
+      return { status: 'missing_checkin', workHours: null };
+    }
+    if (checkIn && !checkOut) {
+      return { status: 'missing_checkout', workHours: null };
+    }
     return { status: 'normal', workHours: null };
   }
+
+  const isFlexible = !!rule.isFlexible;
+  const { hours: startHour, minutes: startMin } = parseTime(rule.workStartTime);
+  const { hours: endHour, minutes: endMin } = parseTime(rule.workEndTime);
+  const tolerance = rule.toleranceMinutes || 0;
 
   let status = 'normal';
   let workHours: number | null = null;
 
-  const { hours: startHour, minutes: startMin } = parseTime(rule.workStartTime);
-  const { hours: endHour, minutes: endMin } = parseTime(rule.workEndTime);
+  const effectiveStart = new Date(dateStr + 'T00:00:00');
+  effectiveStart.setHours(startHour, startMin + tolerance, 0, 0);
 
-  const workStartDate = new Date(dateStr);
-  workStartDate.setHours(startHour, startMin + rule.flexibleMinutes, 0, 0);
-
-  const workEndDate = new Date(dateStr);
-  workEndDate.setHours(endHour, endMin - rule.flexibleMinutes, 0, 0);
+  const effectiveEnd = new Date(dateStr + 'T00:00:00');
+  effectiveEnd.setHours(endHour, endMin - tolerance, 0, 0);
 
   if (checkIn) {
     const checkInDate = new Date(checkIn);
-    if (checkInDate > workStartDate) {
+    if (checkInDate > effectiveStart) {
       status = 'late';
     }
   } else {
@@ -82,18 +100,30 @@ export async function calculateAttendanceStatus(
 
   if (checkOut) {
     const checkOutDate = new Date(checkOut);
-    if (checkOutDate < workEndDate && status === 'normal') {
-      status = 'early_leave';
-    } else if (checkOutDate < workEndDate && status === 'late') {
-      status = 'late';
+    if (checkOutDate < effectiveEnd) {
+      if (status === 'normal') {
+        status = 'early';
+      }
     }
-  } else if (status !== 'missing_checkin') {
-    status = 'missing_checkout';
+  } else {
+    if (status !== 'missing_checkin') {
+      status = 'missing_checkout';
+    }
   }
 
   if (checkIn && checkOut) {
     const diffMs = new Date(checkOut).getTime() - new Date(checkIn).getTime();
     workHours = Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100;
+
+    if (isFlexible && rule.minWorkHours) {
+      if (workHours < rule.minWorkHours && status === 'normal') {
+        status = 'early';
+      }
+    }
+  } else if (checkIn && !checkOut) {
+    // only checkIn, no checkOut - missing_checkout
+  } else if (!checkIn && checkOut) {
+    // only checkOut, no checkIn - missing_checkin
   }
 
   return { status, workHours };
@@ -105,8 +135,10 @@ export async function validatePassCode(passCode: string, doorId: string): Promis
   reason?: string;
 }> {
   const visitor = await db.prepare(`
-    SELECT * FROM visitors 
-    WHERE passCode = ? AND status = 'confirmed'
+    SELECT v.*, e.department as hostDepartment
+    FROM visitors v
+    LEFT JOIN employees e ON v.hostEmployeeId = e.id
+    WHERE v.passCode = ? AND v.status IN ('confirmed', 'visited')
   `).get(passCode) as any;
 
   if (!visitor) {

@@ -25,7 +25,6 @@ import { api } from '../api/client';
 import { Attendance, attendanceStatusMap, departmentMap } from '../types';
 import dayjs from 'dayjs';
 
-const { MonthPicker } = DatePicker;
 const { Option } = Select;
 
 const HRDashboard: React.FC = () => {
@@ -41,8 +40,11 @@ const HRDashboard: React.FC = () => {
   const fetchData = async () => {
     setLoading(true);
     try {
+      const params: any = { month };
+      if (department) params.department = department;
+
       const [statsRes, deptRes] = await Promise.all([
-        api.attendance.getStats({ month, department }),
+        api.attendance.getStats(params),
         api.employees.getDepartments(),
       ]);
 
@@ -53,7 +55,7 @@ const HRDashboard: React.FC = () => {
         setDepartments(deptRes.data.data || []);
       }
     } catch (error) {
-      console.error('Failed to fetch data:', error);
+      console.error('Failed to fetch stats:', error);
     } finally {
       setLoading(false);
     }
@@ -62,9 +64,13 @@ const HRDashboard: React.FC = () => {
   const fetchRecords = async () => {
     setLoading(true);
     try {
-      const response = await api.attendance.getAll({ month, department });
+      const params: any = { month, page: 1, pageSize: 200 };
+      if (department) params.department = department;
+
+      const response = await api.attendance.getAll(params);
       if (response.data.success) {
-        setRecords(response.data.data || []);
+        const data = response.data.data;
+        setRecords(data?.records || []);
       }
     } catch (error) {
       console.error('Failed to fetch records:', error);
@@ -80,7 +86,11 @@ const HRDashboard: React.FC = () => {
 
   const handleExport = async () => {
     try {
-      const response = await api.attendance.exportExcel({ month, department });
+      const [year, mon] = month.split('-');
+      const params: any = { year, month: mon };
+      if (department) params.department = department;
+
+      const response = await api.attendance.exportExcel(params);
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
@@ -88,6 +98,7 @@ const HRDashboard: React.FC = () => {
       document.body.appendChild(link);
       link.click();
       link.remove();
+      window.URL.revokeObjectURL(url);
       message.success('导出成功');
     } catch (error: any) {
       message.error(error.message || '导出失败');
@@ -161,15 +172,16 @@ const HRDashboard: React.FC = () => {
     },
   ];
 
-  const pieData = stats
-    ? [
-        { name: '正常', value: stats.byStatus?.normal || 0 },
-        { name: '迟到', value: stats.byStatus?.late || 0 },
-        { name: '早退', value: stats.byStatus?.early || 0 },
-        { name: '旷工', value: stats.byStatus?.absent || 0 },
-        { name: '周末/节假日', value: stats.byStatus?.weekend || 0 },
-      ]
-    : [];
+  const byStatus = stats?.byStatus || {};
+  const pieData = [
+    { name: '正常', value: byStatus.normal || 0 },
+    { name: '迟到', value: byStatus.late || 0 },
+    { name: '早退', value: byStatus.early || 0 },
+    { name: '旷工', value: byStatus.absent || 0 },
+    { name: '漏打卡', value: byStatus.missing || 0 },
+  ].filter(d => d.value > 0);
+
+  const overall = stats?.overall || {};
 
   return (
     <div>
@@ -177,7 +189,8 @@ const HRDashboard: React.FC = () => {
         <Row gutter={[16, 16]} style={{ marginBottom: 24 }} align="middle">
           <Col>
             <span style={{ marginRight: 8 }}>月份：</span>
-            <MonthPicker
+            <DatePicker
+              picker="month"
               value={dayjs(month)}
               onChange={(date) => date && setMonth(date.format('YYYY-MM'))}
               allowClear={false}
@@ -215,8 +228,8 @@ const HRDashboard: React.FC = () => {
           <Col xs={12} sm={6}>
             <Card className="stat-card">
               <Statistic
-                title={<span style={{ color: '#a0aec0' }}>总出勤天数</span>}
-                value={stats?.totalDays || 0}
+                title={<span style={{ color: '#a0aec0' }}>总考勤记录</span>}
+                value={overall.totalDays || 0}
                 prefix={<TeamOutlined style={{ color: '#00d4ff' }} />}
                 valueStyle={{ color: '#00d4ff' }}
               />
@@ -226,7 +239,7 @@ const HRDashboard: React.FC = () => {
             <Card className="stat-card">
               <Statistic
                 title={<span style={{ color: '#a0aec0' }}>正常出勤</span>}
-                value={stats?.byStatus?.normal || 0}
+                value={byStatus.normal || 0}
                 prefix={<CheckCircleOutlined style={{ color: '#68d391' }} />}
                 valueStyle={{ color: '#68d391' }}
               />
@@ -236,7 +249,7 @@ const HRDashboard: React.FC = () => {
             <Card className="stat-card">
               <Statistic
                 title={<span style={{ color: '#a0aec0' }}>异常次数</span>}
-                value={(stats?.byStatus?.late || 0) + (stats?.byStatus?.early || 0) + (stats?.byStatus?.absent || 0)}
+                value={(byStatus.late || 0) + (byStatus.early || 0) + (byStatus.absent || 0) + (byStatus.missing || 0)}
                 prefix={<WarningOutlined style={{ color: '#f6ad55' }} />}
                 valueStyle={{ color: '#f6ad55' }}
               />
@@ -246,7 +259,7 @@ const HRDashboard: React.FC = () => {
             <Card className="stat-card">
               <Statistic
                 title={<span style={{ color: '#a0aec0' }}>出勤率</span>}
-                value={stats?.totalDays ? ((stats.byStatus?.normal || 0) / stats.totalDays * 100).toFixed(1) : 0}
+                value={overall.totalDays ? ((byStatus.normal || 0) / overall.totalDays * 100).toFixed(1) : 0}
                 suffix="%"
                 prefix={<UserOutlined style={{ color: '#63b3ed' }} />}
                 valueStyle={{ color: '#63b3ed' }}

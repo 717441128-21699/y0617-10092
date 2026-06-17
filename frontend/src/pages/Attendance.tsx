@@ -32,6 +32,7 @@ const Attendance: React.FC = () => {
   const [statistics, setStatistics] = useState<any>({});
   const [recalculateModal, setRecalculateModal] = useState(false);
   const [recalculateForm] = Form.useForm();
+  const [recalcLoading, setRecalcLoading] = useState(false);
 
   const isEmployee = user?.role === 'employee';
 
@@ -113,17 +114,20 @@ const Attendance: React.FC = () => {
   };
 
   const handleRecalculate = async (values: any) => {
+    setRecalcLoading(true);
     try {
-      const response = await api.attendance.recalculate(
-        values.dateRange[0].format('YYYY-MM')
-      );
+      const monthStr = values.month.format('YYYY-MM');
+      const response = await api.attendance.recalculate(monthStr);
       if (response.data.success) {
         message.success(response.data.message);
         setRecalculateModal(false);
+        recalculateForm.resetFields();
         fetchData();
       }
     } catch (error: any) {
       message.error(error.message || '重新计算失败');
+    } finally {
+      setRecalcLoading(false);
     }
   };
 
@@ -300,15 +304,15 @@ const Attendance: React.FC = () => {
       >
         <Form form={recalculateForm} layout="vertical" onFinish={handleRecalculate}>
           <Form.Item
-            name="dateRange"
-            label="选择日期范围"
-            rules={[{ required: true, message: '请选择日期范围' }]}
+            name="month"
+            label="选择月份"
+            rules={[{ required: true, message: '请选择月份' }]}
           >
-            <RangePicker style={{ width: '100%' }} />
+            <DatePicker picker="month" style={{ width: '100%' }} placeholder="请选择月份" />
           </Form.Item>
           <Form.Item>
             <Space>
-              <Button type="primary" htmlType="submit">
+              <Button type="primary" htmlType="submit" loading={recalcLoading}>
                 确认重新计算
               </Button>
               <Button onClick={() => setRecalculateModal(false)}>取消</Button>

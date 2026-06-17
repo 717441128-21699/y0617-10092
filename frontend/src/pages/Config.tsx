@@ -129,8 +129,9 @@ const Config: React.FC = () => {
     setEditingRule(rule);
     ruleForm.setFieldsValue({
       ...rule,
-      coreStartTime: dayjs(rule.coreStartTime, 'HH:mm'),
-      coreEndTime: dayjs(rule.coreEndTime, 'HH:mm'),
+      isFlexible: !!rule.isFlexible,
+      coreStartTime: rule.coreStartTime ? dayjs(rule.coreStartTime, 'HH:mm') : null,
+      coreEndTime: rule.coreEndTime ? dayjs(rule.coreEndTime, 'HH:mm') : null,
       workStartTime: dayjs(rule.workStartTime, 'HH:mm'),
       workEndTime: dayjs(rule.workEndTime, 'HH:mm'),
     });
